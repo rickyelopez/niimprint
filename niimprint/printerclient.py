@@ -1,8 +1,15 @@
-import niimbotpacket
+from niimbotpacket import NiimbotPacket
 import socket
 import struct
 import time
 import enum
+
+from typing import List, Optional
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class InfoEnum(enum.IntEnum):
     DENSITY = 1
@@ -16,49 +23,62 @@ class InfoEnum(enum.IntEnum):
     DEVICESERIAL = 11
     HARDVERSION = 12
 
-_packet_to_int = lambda x: int.from_bytes(x.data, 'big')
+
+_packet_to_int = lambda x: int.from_bytes(x.data, "big")
+
 
 # TODO REMOVE MAGIC NUMBER
 class PrinterClient:
-    def __init__(self, address):
-        self._sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    def __init__(self, address) -> None:
+        self._sock = socket.socket(
+            socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
+        )
         self._sock.connect((address, 1))
         self._packetbuf = bytearray()
+        logger.info("Client created")
 
-    def _recv(self):
+    def _recv(self) -> List[NiimbotPacket]:
         packets = []
         self._packetbuf.extend(self._sock.recv(1024))
         while len(self._packetbuf) > 4:
             pkt_len = self._packetbuf[3] + 7
             if len(self._packetbuf) >= pkt_len:
-                packet = niimbotpacket.NiimbotPacket.from_bytes(self._packetbuf[:pkt_len])
-                # print('recv:',packet)
-                packets.append(packet)
+                packets.append(NiimbotPacket.from_bytes(self._packetbuf[:pkt_len]))
+                logger.info(f"Received packet: {packets[-1]}")
                 del self._packetbuf[:pkt_len]
+
         return packets
 
-    def _send(self, packet):
-        # print('send:',packet)
+    def _send(self, packet) -> None:
+        logger.debug(f"raw packet: {packet.to_bytes()}")
         self._sock.send(packet.to_bytes())
 
-    def _transceive(self, reqcode, data, respcode):
-        self._send(niimbotpacket.NiimbotPacket(reqcode, data))
+    def _transceive(self, reqcode, data, respcode) -> Optional[NiimbotPacket]:
+        """
+        returns none if expected packet is not received,
+        and received packet type is not one of [0, 219]
+
+        otherwise, returns the response packet
+        """
+        self._send(NiimbotPacket(reqcode, data))
+        logger.info(f"Sending packet: {NiimbotPacket(reqcode, data)}")
         resp = None
+        error = None
         for _ in range(6):
             for packet in self._recv():
-                if packet.type == 219:
-                    raise ValueError
-                elif packet.type == 0:
-                    raise NotImplementedError
+                if packet.type in [0, 219]:
+                    error = packet
                 elif packet.type == respcode:
                     resp = packet
+            if error:
+                raise Exception(f"Transceive error, packet type {error.type}")
             if resp:
                 return resp
             time.sleep(0.1)
-        return resp
+        return None
 
     def get_info(self, key):
-        if packet := self._transceive(64, bytes((key,)), 64+key):
+        if packet := self._transceive(64, bytes((key,)), 64 + key):
             match key:
                 case InfoEnum.DEVICESERIAL:
                     return packet.data.hex()
@@ -72,7 +92,7 @@ class PrinterClient:
             return None
 
     def get_rfid(self):
-        packet = self._transceive(26, b'\x01', 27)
+        packet = self._transceive(26, b"\x01", 27)
         data = packet.data
 
         if data[0] == 0:
@@ -82,26 +102,26 @@ class PrinterClient:
 
         barcode_len = data[idx]
         idx += 1
-        barcode = data[idx:idx+barcode_len].decode()
+        barcode = data[idx : idx + barcode_len].decode()
 
         idx += barcode_len
         serial_len = data[idx]
         idx += 1
-        serial = data[idx:idx+serial_len].decode()
+        serial = data[idx : idx + serial_len].decode()
 
         idx += serial_len
-        total_len, used_len, type_ = struct.unpack('>HHB', data[idx:])
+        total_len, used_len, type_ = struct.unpack(">HHB", data[idx:])
         return {
-            'uuid': uuid,
-            'barcode': barcode,
-            'serial': serial,
-            'used_len': used_len,
-            'total_len': total_len,
-            'type': type_
+            "uuid": uuid,
+            "barcode": barcode,
+            "serial": serial,
+            "used_len": used_len,
+            "total_len": total_len,
+            "type": type_,
         }
 
     def heartbeat(self):
-        packet = self._transceive(220, b'\x01', 221)
+        packet = self._transceive(220, b"\x01", 221)
         closingstate = None
         powerlevel = None
         paperstate = None
@@ -129,10 +149,10 @@ class PrinterClient:
                 closingstate = packet.data[8]
 
         return {
-            'closingstate': closingstate,
-            'powerlevel': powerlevel,
-            'paperstate': paperstate,
-            'rfidreadstate': rfidreadstate
+            "closingstate": closingstate,
+            "powerlevel": powerlevel,
+            "paperstate": paperstate,
+            "rfidreadstate": rfidreadstate,
         }
 
     def set_label_type(self, n):
@@ -141,39 +161,39 @@ class PrinterClient:
         return bool(packet.data[0])
 
     def set_label_density(self, n):
-        assert 1 <= n <= 3
+        assert 1 <= n <= 5
         packet = self._transceive(33, bytes((n,)), 49)
         return bool(packet.data[0])
 
     def start_print(self):
-        packet = self._transceive(1, b'\x01', 2)
+        packet = self._transceive(1, b"\x01", 2)
         return bool(packet.data[0])
 
     def end_print(self):
-        packet = self._transceive(243, b'\x01', 244)
+        packet = self._transceive(243, b"\x01", 244)
         return bool(packet.data[0])
 
     def start_page_print(self):
-        packet = self._transceive(3, b'\x01', 4)
+        packet = self._transceive(3, b"\x01", 4)
         return bool(packet.data[0])
 
     def end_page_print(self):
-        packet = self._transceive(227, b'\x01', 228)
+        packet = self._transceive(227, b"\x01", 228)
         return bool(packet.data[0])
 
     def allow_print_clear(self):
-        packet = self._transceive(32, b'\x01', 48)
+        packet = self._transceive(32, b"\x01", 48)
         return bool(packet.data[0])
 
-    def set_dimension(self, w, h):
-        packet = self._transceive(19, struct.pack('>HH', w, h), 20)
+    def set_dimension(self, height, width):
+        packet = self._transceive(19, struct.pack(">HH", height, width), 20)
         return bool(packet.data[0])
 
     def set_quantity(self, n):
-        packet = self._transceive(21, struct.pack('>H', n), 22)
+        packet = self._transceive(21, struct.pack(">H", n), 22)
         return bool(packet.data[0])
 
     def get_print_status(self):
-        packet = self._transceive(163, b'\x01', 179)
-        page, progress1, progress2 = struct.unpack('>HBB', packet.data)
-        return {'page': page, 'progress1': progress1, 'progress2': progress2}
+        packet = self._transceive(163, b"\x01", 179)
+        page, progress1, progress2 = struct.unpack(">HBB", packet.data)
+        return {"page": page, "progress1": progress1, "progress2": progress2}
